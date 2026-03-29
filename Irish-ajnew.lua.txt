@@ -1,0 +1,1890 @@
+-- ============================================================
+-- IRISH COMBINED  (IrishNotifier v6.4 + IrishBot Worker)
+-- All bugs fixed: syntax error, white screen, http_request
+-- self-ref, duplicate Lighting local, unsafe inline math
+-- ============================================================
+
+if not game:IsLoaded() then game.Loaded:Wait() end
+repeat task.wait() until game:GetService("Players").LocalPlayer
+
+-- ============================================================
+-- BOT CONFIG
+-- ============================================================
+local RAILWAY_URL  = "https://acceptable-strength-production-d7a9.up.railway.app"
+local GIST_ID      = "67030845f08f06570d417fab7bdf18bd"
+local GITHUB_TOKEN = "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"
+
+local WEBHOOKS = {
+    MID   = "https://discord.com/api/webhooks/1487734007402598542/rTWbPP-Axz8aCajw8s7zIHXkt9b_4V9uu5_0HkpsojUZsiMyllbGp8vxHisf4FarW-CH",
+    HIGH  = "https://discord.com/api/webhooks/1487734095805943920/HGFjfAKKB708m5xQ0OfvT6Id8wD4F6-wgRc_dqki9Tl76vlGZ4rTjgw97CFAtMRmVfdc",
+    ULTRA = "https://discord.com/api/webhooks/1487734138902413372/KZdwjEElM4NqHtHwnfLN8oGEvIgsLMNzTOt1gsmsV8zZ1VRZ8dKyNT2pj8OL1ng44mnw",
+}
+
+-- ============================================================
+-- SERVICES
+-- ============================================================
+local Players           = game:GetService("Players")
+local Workspace         = game:GetService("Workspace")
+local workspace         = Workspace
+local TeleportService   = game:GetService("TeleportService")
+local HttpService       = game:GetService("HttpService")
+local RunService        = game:GetService("RunService")
+local Lighting          = game:GetService("Lighting")
+local CoreGui           = game:GetService("CoreGui")
+local UserInputService  = game:GetService("UserInputService")
+
+local LocalPlayer = Players.LocalPlayer
+local USERNAME    = LocalPlayer.Name
+
+-- FIX: safe http_request lookup (no self-reference)
+local http_request = (syn and syn.request)
+    or (http and http.request)
+    or (fluxus and fluxus.request)
+    or (typeof(request) == "function" and request)
+    or nil
+if not http_request then error("No HTTP support!") end
+
+print("IRISH COMBINED: Worker = " .. USERNAME)
+
+-- ============================================================
+-- FPS / RENDERING OPTIMISATION
+-- FIX: removed Set3dRenderingEnabled(false) â€” it causes white screen
+-- ============================================================
+if setfpscap then setfpscap(20) end
+task.spawn(function()
+    pcall(function()
+        Lighting.GlobalShadows = false
+        Lighting.Brightness    = 0
+        Lighting.FogEnd        = 1
+        task.wait(0.1)
+        for _, effect in ipairs(Lighting:GetChildren()) do
+            if effect:IsA("PostEffect") or effect:IsA("Atmosphere") or effect:IsA("Sky") then
+                pcall(function() effect:Destroy() end)
+            end
+        end
+    end)
+    task.wait(0.1)
+    pcall(function()
+        local t = workspace.Terrain
+        t.WaterWaveSize    = 0
+        t.WaterWaveSpeed   = 0
+        t.WaterTransparency = 1
+        t.Decoration       = false
+    end)
+    -- NOTE: Set3dRenderingEnabled(false) intentionally removed â€” causes white screen
+end)
+
+pcall(function()
+    CoreGui.RobloxPromptGui.ChildAdded:Connect(function(c)
+        task.delay(0.1, function() pcall(function() c:Destroy() end) end)
+    end)
+end)
+
+-- ============================================================
+-- CHARACTER APPEARANCE CLEARING
+-- ============================================================
+for _, player in pairs(Players:GetPlayers()) do
+    player.CharacterAdded:Connect(function() player:ClearCharacterAppearance() end)
+    player:ClearCharacterAppearance()
+end
+Players.PlayerAdded:Connect(function(player)
+    player.CharacterAdded:Connect(function() player:ClearCharacterAppearance() end)
+end)
+
+-- ============================================================
+-- STATE
+-- ============================================================
+local genv = getgenv()
+local fenv = getfenv()
+
+fenv.AutoJoinEnabled = false
+fenv.MinMoney        = 10
+fenv.BrainrotESP     = false
+fenv.PlayerESP       = false
+fenv.AntiLag         = false
+fenv.Optimize        = false
+fenv.PaidJoiner      = false
+fenv.UltraMode       = false
+
+-- ============================================================
+-- CLEANUP OLD GUIs
+-- ============================================================
+local playerGui = LocalPlayer:WaitForChild("PlayerGui")
+for _, n in ipairs({"JoinerUI", "IrishNotifierUI", "AutoJoin_Settings"}) do
+    local old = playerGui:FindFirstChild(n)
+    if old then old:Destroy() end
+end
+
+-- ============================================================
+-- SIZES
+-- ============================================================
+local panelW    = 420
+local panelH    = 540
+local filterW   = 380
+local filterH   = 460
+local fontSize  = 13
+local titleSize = 14
+local btnH      = 28
+local titleBarH = 44
+
+-- pre-compute reused half values to avoid inline division bugs
+local titleBtnH   = titleBarH - 12
+local titleBtnHalf = titleBtnH / 2
+local bottomBtnH   = 0  -- set after bottomBarH is defined
+local bottomBarH   = 44
+bottomBtnH = bottomBarH - 14
+local bottomBtnHalf = bottomBtnH / 2
+
+-- ============================================================
+-- UI HELPERS
+-- ============================================================
+local function addCorner(parent, radius)
+    local c = Instance.new("UICorner", parent)
+    c.CornerRadius = UDim.new(0, radius or 8)
+    return c
+end
+
+local function addStroke(parent, color, thickness)
+    local s = Instance.new("UIStroke", parent)
+    s.Color     = color
+    s.Thickness = thickness or 1.5
+    return s
+end
+
+local function makeDraggable(frame, handle)
+    local dragging, dragStart, startPos = false, nil, nil
+    handle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging  = true
+            dragStart = input.Position
+            startPos  = frame.Position
+        end
+    end)
+    handle.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (
+            input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch
+        ) then
+            local d = input.Position - dragStart
+            frame.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + d.X,
+                startPos.Y.Scale, startPos.Y.Offset + d.Y
+            )
+        end
+    end)
+end
+
+-- ============================================================
+-- PRIORITY LIST
+-- ============================================================
+local PRIORITY_LIST = {
+    "Strawberry Elephant", "Meowl", "Skibidi Toilet", "Headless Horseman",
+    "Dragon Gingerini", "Dragon Cannelloni", "Ketupat Bros", "Hydra Dragon Cannelloni",
+    "La Supreme Combinasion", "Love Love Bear", "Ginger Gerat", "Cerberus",
+    "Capitano Moby", "La Casa Boo", "Burguro and Fryuro", "Spooky and Pumpky",
+    "Cooki and Milki", "Rosey and Teddy", "Popcuru and Fizzuru", "Reinito Sleighito",
+    "Fragrama and Chocrama", "Garama and Madundung", "Ketchuru and Musturu",
+    "La Secret Combinasion", "Tralaledon", "Tictac Sahur", "Ketupat Kepat",
+    "Tang Tang Keletang", "Orcaledon", "La Ginger Sekolah", "Los Spaghettis",
+    "Lavadorito Spinito", "Swaggy Bros", "La Taco Combinasion", "Los Primos",
+    "Chillin Chili", "Tuff Toucan", "W or L", "Chipso and Queso",
+}
+
+local BRAINROT_IMAGES = {
+    ["Skibidi Toilet"]          = "https://static.wikia.nocookie.net/stealabr/images/3/34/Skibidi_toilet.png/revision/latest",
+    ["Ginger Gerat"]            = "https://static.wikia.nocookie.net/stealabr/images/8/85/GingerGerat.png/revision/latest",
+    ["Ketupat Bros"]            = "https://static.wikia.nocookie.net/stealabr/images/4/4d/Ketupat_Bros.png/revision/latest",
+    ["Cerberus"]                = "https://static.wikia.nocookie.net/stealabr/images/4/45/Cerberus.png/revision/latest",
+    ["Dragon Cannelloni"]       = "https://static.wikia.nocookie.net/stealabr/images/3/31/Nah_uh.png/revision/latest",
+    ["Dragon Gingerini"]        = "https://static.wikia.nocookie.net/stealabr/images/3/3a/DragonGingerini.png/revision/latest",
+    ["Headless Horseman"]       = "https://static.wikia.nocookie.net/stealabr/images/f/ff/Headlesshorseman.png/revision/latest",
+    ["Hydra Dragon Cannelloni"] = "https://static.wikia.nocookie.net/stealabr/images/e/ee/Hydra_Dragon_Cannelloni.png/revision/latest",
+    ["Meowl"]                   = "https://static.wikia.nocookie.net/stealabr/images/b/b8/Clear_background_clear_meowl_image.png/revision/latest",
+    ["Strawberry Elephant"]     = "https://static.wikia.nocookie.net/stealabr/images/5/58/Strawberryelephant.png/revision/latest",
+    ["Love Love Bear"]          = "https://static.wikia.nocookie.net/stealabr/images/8/89/Love_Love_Bear.png/revision/latest",
+    ["Chipso and Queso"]        = "https://static.wikia.nocookie.net/stealabr/images/f/f8/Chipsoqueso.png/revision/latest",
+    ["Tuff Toucan"]             = "https://static.wikia.nocookie.net/stealabr/images/3/3e/TuffToucan.png/revision/latest",
+    ["Tralaledon"]              = "https://static.wikia.nocookie.net/stealabr/images/7/79/Brr_Brr_Patapem.png/revision/latest",
+    ["Los Primos"]              = "https://static.wikia.nocookie.net/stealabr/images/9/96/LosPrimos.png/revision/latest",
+    ["Tang Tang Keletang"]      = "https://static.wikia.nocookie.net/stealabr/images/c/ce/TangTangVfx.png/revision/latest",
+    ["Swaggy Bros"]             = "https://static.wikia.nocookie.net/stealabr/images/8/85/Swaggy_Bros.png/revision/latest",
+    ["Orcaledon"]               = "https://static.wikia.nocookie.net/stealabr/images/a/a6/Orcaledon.png/revision/latest",
+    ["Lavadorito Spinito"]      = "https://static.wikia.nocookie.net/stealabr/images/f/ff/Lavadorito_Spinito.png/revision/latest",
+    ["Chillin Chili"]           = "https://static.wikia.nocookie.net/stealabr/images/e/e0/Chilin.png/revision/latest",
+    ["Spooky and Pumpky"]       = "https://static.wikia.nocookie.net/stealabr/images/d/d6/Spookypumpky.png/revision/latest",
+    ["La Casa Boo"]             = "https://static.wikia.nocookie.net/stealabr/images/d/de/Casa_Booo.png/revision/latest",
+    ["Cooki and Milki"]         = "https://static.wikia.nocookie.net/stealabr/images/9/9b/Cooki_and_milki.png/revision/latest",
+    ["Capitano Moby"]           = "https://static.wikia.nocookie.net/stealabr/images/e/ef/Moby.png/revision/latest",
+    ["Rosey and Teddy"]         = "https://static.wikia.nocookie.net/stealabr/images/4/4d/Rosey_and_teddy.png/revision/latest",
+    ["Popcuru and Fizzuru"]     = "https://static.wikia.nocookie.net/stealabr/images/a/a9/Popuru_and_Fizzuru.png/revision/latest",
+    ["Reinito Sleighito"]       = "https://static.wikia.nocookie.net/stealabr/images/2/27/Reinito.png/revision/latest",
+    ["Fragrama and Chocrama"]   = "https://static.wikia.nocookie.net/stealabr/images/5/56/Fragrama.png/revision/latest",
+    ["Garama and Madundung"]    = "https://static.wikia.nocookie.net/stealabr/images/e/ee/Garamadundung.png/revision/latest",
+    ["Ketchuru and Musturu"]    = "https://static.wikia.nocookie.net/stealabr/images/1/14/Ketchuru.png/revision/latest",
+    ["La Secret Combinasion"]   = "https://static.wikia.nocookie.net/stealabr/images/f/f2/Lasecretcombinasion.png/revision/latest",
+    ["Burguro And Fryuro"]      = "https://static.wikia.nocookie.net/stealabr/images/6/65/Burguro-And-Fryuro.png/revision/latest",
+    ["Los Spaghettis"]          = "https://static.wikia.nocookie.net/stealabr/images/3/33/Los_Spaghettis.png/revision/latest",
+    ["La Ginger Sekolah"]       = "https://static.wikia.nocookie.net/stealabr/images/1/14/Esok_Ginger.png/revision/latest",
+    ["Ketupat Kepat"]           = "https://static.wikia.nocookie.net/stealabr/images/a/ac/KetupatKepat.png/revision/latest",
+    ["Tictac Sahur"]            = "https://static.wikia.nocookie.net/stealabr/images/6/6f/Time_moving_slow.png/revision/latest",
+    ["La Taco Combinasion"]     = "https://static.wikia.nocookie.net/stealabr/images/8/84/Latacocombi.png/revision/latest",
+}
+
+-- ============================================================
+-- BRAINROT DATA (extended list)
+-- ============================================================
+local allBrainrots = {
+    "Skibidi Toilet", "Ginger Gerat", "Ketupat Bros", "Cerberus", "Dragon Cannelloni",
+    "Dragon Gingerini", "Headless Horseman", "Hydra Dragon Cannelloni", "Meowl",
+    "Strawberry Elephant", "Love Love Bear", "Nuclearo Dinosauro", "Tacorita Bicicleta",
+    "Fishino Clownino", "Las Sis", "Los Bros", "Los Planitos", "Los Hotspotsitos",
+    "Los Jolly Combinasionas", "Money Money Puggy", "Celularcini Viciosini",
+    "La Extinct Grande", "La Spooky Grande", "Chillin Chili", "Chipso and Queso",
+    "Tuff Toucan", "Gobblino Uniciclino", "Tralaledon", "La Jolly Grande",
+    "La Romantic Grande", "Los Puggies", "Los Primos", "Eviledon", "Los Tacoritas",
+    "Tang Tang Keletang", "La Taco Combinasion", "Ketupat Kepat", "Tictac Sahur",
+    "Swaggy Bros", "Orcaledon", "Ketchuru and Musturu", "Jolly Jolly Sahur",
+    "Lavadorito Spinito", "Garama and Madundung", "Spaghetti Tualetti", "Rosetti Tualetti",
+    "Festive 67", "Los Spaghettis", "La Ginger Sekolah", "Spooky and Pumpky", "La Casa Boo",
+    "Fragrama and Chocrama", "La Secret Combinasion", "Reinito Sleighito", "Burguro And Fryuro",
+    "Cooki and Milki", "Capitano Moby", "Rosey and Teddy", "Popcuru and Fizzuru",
+    "DJ Panda", "Luck Luck Luck Sahur", "Cigno Fulgoro", "Los Combinasionas",
+    "Bacuru and Egguru", "Mi Gatito", "Cupid Cupid Sahur", "Graipuss Medussi",
+}
+
+-- ============================================================
+-- BOT HELPERS
+-- ============================================================
+local function getPriority(name)
+    for i, v in ipairs(PRIORITY_LIST) do
+        if v == name then return i end
+    end
+    return 999
+end
+
+local function getWebhook(genM)
+    if genM >= 550 then return WEBHOOKS.ULTRA, "Ultra Highlights"
+    elseif genM >= 100 then return WEBHOOKS.HIGH, "Highlights"
+    else return WEBHOOKS.MID, "Mid Highlights" end
+end
+
+-- ============================================================
+-- DUEL DETECTION
+-- ============================================================
+local duelBases   = {}
+local duelPlayers = {}
+
+local function IsPlayerInDuel(player)
+    if not player then return false end
+    return player:GetAttribute("__duels_block_steal") == true
+end
+
+local function DetectDuelBases()
+    duelBases   = {}
+    duelPlayers = {}
+    local Plots = workspace:FindFirstChild("Plots")
+    if not Plots then return end
+    for _, plot in ipairs(Plots:GetChildren()) do
+        local sign = plot:FindFirstChild("PlotSign")
+        if not sign then continue end
+        local sg = sign:FindFirstChild("SurfaceGui")
+        local fr = sg and sg:FindFirstChild("Frame")
+        local tl = fr and fr:FindFirstChild("TextLabel")
+        local baseText = tl and tl.Text or nil
+        if not baseText or baseText == "Empty Base" then continue end
+        local nickname = baseText:match("^(.-)'") or baseText
+        local ownerPlayer = nil
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p.DisplayName == nickname or p.Name == nickname then
+                ownerPlayer = p; break
+            end
+        end
+        if ownerPlayer and IsPlayerInDuel(ownerPlayer) then
+            duelBases[plot.Name]            = {plot = plot, owner = ownerPlayer, ownerName = ownerPlayer.Name}
+            duelPlayers[ownerPlayer.UserId] = true
+        end
+    end
+end
+
+task.spawn(function()
+    while true do pcall(DetectDuelBases); task.wait(2) end
+end)
+
+-- ============================================================
+-- PLOT HELPERS
+-- ============================================================
+local function parseMoneyPerSec(text)
+    if not text or not text:find("/s") then return 0 end
+    text = text:gsub("%$", ""):gsub("/s", ""):gsub("%s+", "")
+    local mult = 1
+    if text:find("[Tt]") then mult = 1e12
+    elseif text:find("[Bb]") then mult = 1e9
+    elseif text:find("[Mm]") then mult = 1e6
+    elseif text:find("[Kk]") then mult = 1e3
+    end
+    text = text:gsub("[KkMmBbTt]", "")
+    return (tonumber(text) or 0) * mult
+end
+
+local function getUsernameFromDisplayName(dn)
+    for _, p in pairs(Players:GetPlayers()) do
+        if p.DisplayName == dn or p.Name == dn then return p.Name end
+    end
+    return nil
+end
+
+local function getUsernameFromPlot(plot)
+    local ok, r = pcall(function()
+        if plot:FindFirstChild("Owner") then
+            local o = plot.Owner
+            if o:IsA("StringValue") then return o.Value end
+            if o:IsA("ObjectValue") and o.Value then return o.Value.Name end
+        end
+        return plot:GetAttribute("Owner") or plot:GetAttribute("OwnerName") or nil
+    end)
+    return ok and r or nil
+end
+
+local function getPlotOwnerInfo(plotId)
+    local ok, r = pcall(function()
+        local plot = workspace.Plots:FindFirstChild(plotId)
+        if not plot then return nil end
+        local sign = plot:FindFirstChild("PlotSign")
+        if sign then
+            local sg = sign:FindFirstChild("SurfaceGui")
+            local fr = sg and sg:FindFirstChild("Frame")
+            local tl = fr and fr:FindFirstChild("TextLabel")
+            if tl and tl.Text ~= "" then
+                local dn = tl.Text:gsub("'s [Bb]ase", ""):gsub("'s [Pp]lot", ""):match("^%s*(.-)%s*$")
+                if dn ~= "" then return getUsernameFromDisplayName(dn) or getUsernameFromPlot(plot) or dn end
+            end
+        end
+        return getUsernameFromPlot(plot)
+    end)
+    return ok and r or nil
+end
+
+local function findOwnerForBrainrot(obj)
+    local cur = obj.Parent
+    while cur and cur ~= workspace do
+        if cur.Parent and cur.Parent.Name == "Plots" then
+            return getPlotOwnerInfo(cur.Name) or "Unknown"
+        end
+        cur = cur.Parent
+    end
+    return "Unknown"
+end
+
+local function findPlotFolderForBrainrot(obj)
+    local cur = obj.Parent
+    while cur and cur ~= workspace do
+        if cur.Parent and cur.Parent.Name == "Plots" then return cur end
+        cur = cur.Parent
+    end
+    return nil
+end
+
+local function getPlotOwnerName(plotFolder)
+    local ok, result = pcall(function()
+        local sign = plotFolder:FindFirstChild("PlotSign")
+        if not sign then return nil end
+        local sg = sign:FindFirstChild("SurfaceGui")
+        local fr = sg and sg:FindFirstChild("Frame")
+        local tl = fr and fr:FindFirstChild("TextLabel")
+        if not tl or tl.Text == "" then return nil end
+        local nickname = tl.Text:match("^(.-)'") or tl.Text
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p.DisplayName == nickname or p.Name == nickname then return p.Name end
+        end
+        return nickname
+    end)
+    return ok and result or nil
+end
+
+local function isPlotInDuel(plotFolder)
+    if not plotFolder then return false end
+    if duelBases[plotFolder.Name] then return true end
+    local ownerName = getPlotOwnerName(plotFolder)
+    if not ownerName then return false end
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p.Name == ownerName or p.DisplayName == ownerName then
+            return duelPlayers[p.UserId] == true or IsPlayerInDuel(p)
+        end
+    end
+    return false
+end
+
+-- ============================================================
+-- BOT SCANNER
+-- ============================================================
+local MIN_GENERATION = 10
+
+local JUNK_ANCESTORS = {
+    AnimalOverhead   = true,
+    Overhead         = true,
+    NameTag          = true,
+    HumanoidRootPart = true,
+    Head             = true,
+}
+local JUNK_NAMES = {
+    AnimalOverhead = true, Base = true, Spawn = true,
+    Model = true, Part = true, Handle = true,
+}
+
+local function isInsideJunkAncestor(obj)
+    local cur = obj.Parent
+    while cur and cur ~= workspace do
+        if JUNK_ANCESTORS[cur.Name] then return true end
+        cur = cur.Parent
+    end
+    return false
+end
+
+local function scanAllBrainrots()
+    local detections = {}
+    local descendants = workspace:GetDescendants()
+    local batchSize   = 50
+    for i = 1, #descendants, batchSize do
+        local batchEnd = math.min(i + batchSize - 1, #descendants)
+        for j = i, batchEnd do
+            local obj = descendants[j]
+            if not obj:IsA("TextLabel") then continue end
+            if isInsideJunkAncestor(obj) then continue end
+            local isGenLabel = (
+                obj.Name == "Generation"      or obj.Name == "MoneyPerSec" or
+                obj.Name == "Income"          or obj.Name == "GenLabel"    or
+                obj.Name == "GenerationLabel" or
+                (obj.Text and obj.Text:find("/s") and obj.Text:find("%$"))
+            )
+            if isGenLabel then
+                local moneyValue = parseMoneyPerSec(obj.Text)
+                local moneyM     = moneyValue / 1e6
+                if moneyM >= MIN_GENERATION then
+                    local parent = obj.Parent
+                    local name   = "Unknown"
+                    if parent then
+                        local dn = parent:FindFirstChild("DisplayName")
+                        if dn and dn:IsA("TextLabel") and dn.Text ~= "" and not JUNK_NAMES[dn.Text] then
+                            name = dn.Text
+                        elseif parent:FindFirstChild("BrainrotName") and parent.BrainrotName.Value ~= "" then
+                            name = parent.BrainrotName.Value
+                        elseif parent:FindFirstChild("Title") and parent.Title:IsA("TextLabel")
+                            and parent.Title.Text ~= "" and not JUNK_NAMES[parent.Title.Text] then
+                            name = parent.Title.Text
+                        elseif not JUNK_NAMES[parent.Name] then
+                            name = parent.Name
+                        elseif parent.Parent and not JUNK_NAMES[parent.Parent.Name]
+                            and parent.Parent ~= workspace then
+                            name = parent.Parent.Name
+                        end
+                    end
+                    local rawMut = (parent and parent:FindFirstChild("Mutation")
+                        and parent.Mutation.Visible and parent.Mutation.Text) or "None"
+                    local mutation = rawMut:gsub("<[^>]+>", ""):gsub("%s+", " "):match("^%s*(.-)%s*$")
+                    if mutation:lower():find("yin") and mutation:lower():find("yang") then
+                        mutation = "YinYang"
+                    end
+                    if mutation == "" then mutation = "None" end
+                    local owner      = findOwnerForBrainrot(obj)
+                    local isDuel     = false
+                    local plotFolder = findPlotFolderForBrainrot(obj)
+                    if plotFolder then isDuel = isPlotInDuel(plotFolder) end
+                    table.insert(detections, {
+                        name       = name,
+                        generation = obj.Text,
+                        genM       = moneyM,
+                        mutation   = mutation,
+                        owner      = owner,
+                        isDuel     = isDuel,
+                    })
+                end
+            end
+        end
+        if i % (batchSize * 2) == 0 then task.wait(0.01) end
+    end
+    table.sort(detections, function(a, b) return a.genM > b.genM end)
+    local best = nil
+    for _, d in ipairs(detections) do
+        d.priority = getPriority(d.name)
+        if best == nil then
+            best = d
+        elseif d.priority < best.priority then
+            best = d
+        elseif d.priority == best.priority and d.genM > best.genM then
+            best = d
+        end
+    end
+    return detections, best
+end
+
+-- ============================================================
+-- DISCORD / RAILWAY / GIST PUSH
+-- ============================================================
+local function sendDiscord(allHits, best, serverId)
+    if not best then return end
+    task.spawn(function()
+        pcall(function()
+            local webhookUrl, label = getWebhook(best.genM)
+            local mutPrefix = (best.mutation and best.mutation ~= "None") and (best.mutation .. " ") or ""
+            local desc = ""
+            if best.owner and best.owner ~= "Unknown" then
+                desc = desc .. "**Owner:** " .. best.owner .. "\n"
+            end
+            if best.isDuel then desc = desc .. "IN DUEL\n" end
+            desc = desc .. "\n**Brainrots**\n```\n"
+            for _, h in ipairs(allHits) do
+                local line = "1x "
+                if h.mutation and h.mutation ~= "None" then line = line .. h.mutation .. " " end
+                line = line .. h.name .. " - " .. h.generation
+                if h.owner and h.owner ~= "Unknown" then line = line .. " (@" .. h.owner .. ")" end
+                if h.isDuel then line = line .. " [DUEL]" end
+                desc = desc .. line .. "\n"
+            end
+            desc = desc .. "```"
+            local embed = {
+                title       = "1x " .. mutPrefix .. best.name .. " (" .. best.generation .. ")",
+                description = desc,
+                color       = 65280,
+                footer      = {text = "Irish Notifier | " .. os.date("!%m/%d/%Y %I:%M %p")},
+                timestamp   = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+            }
+            local img = BRAINROT_IMAGES[best.name]
+            if img then embed.thumbnail = {url = img} end
+            http_request({
+                Url     = webhookUrl,
+                Method  = "POST",
+                Headers = {["Content-Type"] = "application/json"},
+                Body    = HttpService:JSONEncode({username = "Irish Notifier", embeds = {embed}}),
+            })
+            print("IRISH COMBINED: Discord sent -> " .. best.name .. " [" .. label .. "]")
+        end)
+    end)
+end
+
+local function pushToRailway(best, serverId)
+    if not best then return end
+    pcall(function()
+        http_request({
+            Url     = RAILWAY_URL .. "/api/ping",
+            Method  = "POST",
+            Headers = {["Content-Type"] = "application/json"},
+            Body    = HttpService:JSONEncode({
+                job_id    = serverId,
+                place_id  = game.PlaceId,
+                name      = best.name,
+                money     = string.format("%.2fM", best.genM),
+                money_raw = best.genM * 1e6,
+                players   = "?",
+                ts        = os.time() * 1000,
+            }),
+        })
+        print("IRISH COMBINED: Railway pushed -> " .. best.name)
+    end)
+end
+
+local function pushToGist(best, serverId)
+    if not best then return end
+    pcall(function()
+        local content = HttpService:JSONEncode({
+            servers = {{
+                job_id   = serverId,
+                place_id = game.PlaceId,
+                name     = best.name,
+                money    = string.format("%.2fM", best.genM),
+                players  = "?",
+                ts       = os.time() * 1000,
+            }},
+            ts    = os.time() * 1000,
+            count = 1,
+        })
+        http_request({
+            Url     = "https://api.github.com/gists/" .. GIST_ID,
+            Method  = "PATCH",
+            Headers = {
+                ["Authorization"] = "token " .. GITHUB_TOKEN,
+                ["Accept"]        = "application/vnd.github.v3+json",
+                ["Content-Type"]  = "application/json",
+            },
+            Body = HttpService:JSONEncode({files = {["servers.json"] = {content = content}}}),
+        })
+        print("IRISH COMBINED: Gist pushed -> " .. best.name)
+    end)
+end
+
+-- ============================================================
+-- SERVER HOP LOGIC
+-- ============================================================
+local function isStuckOnLoading()
+    if not game:IsLoaded() then return true end
+    if not Players.LocalPlayer then return true end
+    if not Players.LocalPlayer.Character then return true end
+    if #workspace:GetChildren() < 5 then return true end
+    return false
+end
+
+local function waitForGameLoad(maxWait)
+    maxWait = maxWait or 15
+    local t = tick()
+    repeat
+        if tick() - t > maxWait then return false end
+        task.wait(0.1)
+    until game:IsLoaded() and Players.LocalPlayer and Players.LocalPlayer.Character
+    local t2 = tick()
+    repeat
+        if tick() - t2 > 5 then return false end
+        task.wait(0.1)
+    until #workspace:GetChildren() >= 5
+    return true
+end
+
+local function hopToServer()
+    local startJobId = game.JobId
+    local hopStart   = tick()
+    print("IRISH COMBINED: Hopping from " .. startJobId:sub(1, 8) .. "...")
+    while game.JobId == startJobId do
+        if tick() - hopStart > 30 then
+            warn("IRISH COMBINED: Hop timeout, force rejoining...")
+            pcall(function() TeleportService:Teleport(game.PlaceId) end)
+            task.wait(2)
+            hopStart   = tick()
+            startJobId = game.JobId
+        end
+        local servers = {}
+        local ok, result = pcall(function()
+            return game:HttpGet("https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100")
+        end)
+        if ok and result then
+            pcall(function()
+                servers = (HttpService:JSONDecode(result) or {}).data or {}
+            end)
+        end
+        local found = false
+        for _, s in ipairs(servers) do
+            if s.id and s.id ~= game.JobId and s.playing <= (s.maxPlayers - 2) then
+                print("IRISH COMBINED: Teleporting (" .. s.playing .. "/" .. s.maxPlayers .. ")")
+                pcall(function() TeleportService:TeleportToPlaceInstance(game.PlaceId, s.id) end)
+                found = true; break
+            end
+        end
+        if not found then
+            warn("IRISH COMBINED: No free servers, rejoining...")
+            pcall(function() TeleportService:Teleport(game.PlaceId) end)
+        end
+        task.wait(2)
+    end
+    print("IRISH COMBINED: Server changed -> " .. game.JobId:sub(1, 8))
+end
+
+local scanComplete    = false
+local hopReady        = false
+local currentServerId = nil
+local lastSentKey     = ""
+local serverJoinTime  = tick()
+
+local function performScan()
+    scanComplete    = false
+    hopReady        = false
+    currentServerId = game.JobId
+    print("IRISH COMBINED: Loading...")
+    if not waitForGameLoad(15) then
+        print("IRISH COMBINED: Load timeout")
+        scanComplete = true; hopReady = true; return
+    end
+    local jobWait = tick()
+    while (game.JobId == "" or #game.JobId < 30) and tick() - jobWait < 10 do
+        task.wait(0.1)
+    end
+    currentServerId = game.JobId
+    if not currentServerId or #currentServerId < 30 then
+        print("IRISH COMBINED: Invalid server")
+        scanComplete = true; hopReady = true; return
+    end
+    local t = tick()
+    repeat
+        task.wait(0.2)
+        if isStuckOnLoading() then
+            print("IRISH COMBINED: Stuck"); scanComplete = true; hopReady = true; return
+        end
+        if tick() - t > 12 then
+            print("IRISH COMBINED: Plots timeout"); scanComplete = true; hopReady = true; return
+        end
+    until workspace:FindFirstChild("Plots")
+    task.wait(0.5)
+    print("IRISH COMBINED: Scanning for 35 seconds...")
+    local serverSentKeys = {}
+    while tick() - serverJoinTime < 35 do
+        local allHits, best = scanAllBrainrots()
+        if best then
+            local sendKey = best.name .. "|" .. currentServerId
+            if not serverSentKeys[sendKey] and sendKey ~= lastSentKey then
+                serverSentKeys[sendKey] = true
+                lastSentKey             = sendKey
+                print("IRISH COMBINED: HIT -> " .. best.name .. " " .. best.generation)
+                sendDiscord(allHits, best, currentServerId)
+                pushToRailway(best, currentServerId)
+                pushToGist(best, currentServerId)
+                if genv.IrishNotifier_AddRow then
+                    local mM  = math.floor(best.genM * 10) / 10
+                    local sub = (best.owner ~= "Unknown") and ("@" .. best.owner) or "Scanned"
+                    genv.IrishNotifier_AddRow(best.name, sub, mM, game.PlaceId, currentServerId)
+                end
+            end
+        end
+        task.wait(0.1)
+    end
+    print("IRISH COMBINED: 35s done, hopping...")
+    scanComplete = true
+    hopReady     = true
+end
+
+task.spawn(performScan)
+
+local stuckStartTime = nil
+
+task.spawn(function()
+    while true do
+        repeat task.wait(0.05) until scanComplete and hopReady
+        print("IRISH COMBINED: Hopping to next server...")
+        hopToServer()
+        serverJoinTime = tick()
+        task.spawn(performScan)
+    end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(3)
+        if not scanComplete then
+            if isStuckOnLoading() then
+                if not stuckStartTime then
+                    stuckStartTime = tick()
+                elseif tick() - stuckStartTime > 10 then
+                    print("IRISH COMBINED: Load stuck, forcing...")
+                    stuckStartTime = nil
+                    scanComplete   = true
+                    hopReady       = true
+                end
+            else
+                stuckStartTime = nil
+            end
+        else
+            stuckStartTime = nil
+        end
+    end
+end)
+
+TeleportService.TeleportInitFailed:Connect(function()
+    print("IRISH COMBINED: Teleport failed, retrying...")
+    scanComplete = true; hopReady = true
+end)
+
+-- ============================================================
+-- ESP STORAGE
+-- ============================================================
+local espBillboards = {}
+local espBoxes      = {}
+local espHeartbeats = {}
+
+local RAD_GREEN         = Color3.fromRGB(57, 255, 20)
+local PLAYER_BOX_COLOR  = Color3.fromRGB(57, 255, 20)
+local PLAYER_NAME_COLOR = Color3.fromRGB(57, 255, 20)
+local MONEY_COLOR       = Color3.fromRGB(57, 255, 20)
+local DIST_COLOR        = Color3.fromRGB(200, 255, 200)
+
+local function createBrainrotBillboard(adornee, brainrotName, moneyPerSec)
+    local bb = Instance.new("BillboardGui")
+    bb.Name        = "IrishESP_Brainrot"
+    bb.AlwaysOnTop = true
+    bb.Size        = UDim2.new(0, 200, 0, 52)
+    bb.StudsOffset = Vector3.new(0, 5, 0)
+    bb.Adornee     = adornee
+    bb.Parent      = Workspace
+
+    local nameLbl = Instance.new("TextLabel", bb)
+    nameLbl.Size                   = UDim2.new(1, 0, 0, 26)
+    nameLbl.Position               = UDim2.new(0, 0, 0, 0)
+    nameLbl.BackgroundTransparency = 1
+    nameLbl.TextColor3             = RAD_GREEN
+    nameLbl.Font                   = Enum.Font.GothamBold
+    nameLbl.TextSize               = 15
+    nameLbl.Text                   = tostring(brainrotName)
+    nameLbl.TextStrokeTransparency = 0
+    nameLbl.TextStrokeColor3       = Color3.new(0, 0, 0)
+
+    local monLbl = Instance.new("TextLabel", bb)
+    monLbl.Size                   = UDim2.new(1, 0, 0, 20)
+    monLbl.Position               = UDim2.new(0, 0, 0, 27)
+    monLbl.BackgroundTransparency = 1
+    monLbl.TextColor3             = MONEY_COLOR
+    monLbl.Font                   = Enum.Font.GothamBold
+    monLbl.TextSize               = 13
+    monLbl.Text                   = "$" .. tostring(moneyPerSec) .. "M/s"
+    monLbl.TextStrokeTransparency = 0
+    monLbl.TextStrokeColor3       = Color3.new(0, 0, 0)
+
+    return bb
+end
+
+local function createPlayerESP(player)
+    if player == LocalPlayer then return end
+    local char = player.Character
+    if not char then return end
+    local hrp  = char:FindFirstChild("HumanoidRootPart")
+    local head = char:FindFirstChild("Head")
+    if not hrp then return end
+
+    local key = "player__" .. player.Name
+    if espBoxes[key] and espBoxes[key].Parent       then espBoxes[key]:Destroy() end
+    if espBillboards[key] and espBillboards[key].Parent then espBillboards[key]:Destroy() end
+    if espHeartbeats[key] then espHeartbeats[key]:Disconnect() end
+
+    local box = Instance.new("BoxHandleAdornment")
+    box.Name        = "IrishESP_Box"
+    box.Adornee     = hrp
+    box.Size        = Vector3.new(4.2, 6.2, 2.2)
+    box.Color3      = PLAYER_BOX_COLOR
+    box.Transparency = 0.25
+    box.ZIndex      = 10
+    box.AlwaysOnTop = true
+    box.Parent      = char
+    espBoxes[key]   = box
+
+    local bb = Instance.new("BillboardGui")
+    bb.Name         = "IrishESP_Player"
+    bb.AlwaysOnTop  = true
+    bb.Size         = UDim2.new(0, 200, 0, 52)
+    bb.StudsOffset  = Vector3.new(0, 4.5, 0)
+    bb.Adornee      = head or hrp
+    bb.Parent       = Workspace
+    espBillboards[key] = bb
+
+    local nameLbl = Instance.new("TextLabel", bb)
+    nameLbl.Size                   = UDim2.new(1, 0, 0, 26)
+    nameLbl.Position               = UDim2.new(0, 0, 0, 0)
+    nameLbl.BackgroundTransparency = 1
+    nameLbl.TextColor3             = PLAYER_NAME_COLOR
+    nameLbl.Font                   = Enum.Font.GothamBold
+    nameLbl.TextSize               = 15
+    nameLbl.Text                   = player.DisplayName
+    nameLbl.TextStrokeTransparency = 0
+    nameLbl.TextStrokeColor3       = Color3.new(0, 0, 0)
+
+    local distLbl = Instance.new("TextLabel", bb)
+    distLbl.Size                   = UDim2.new(1, 0, 0, 20)
+    distLbl.Position               = UDim2.new(0, 0, 0, 27)
+    distLbl.BackgroundTransparency = 1
+    distLbl.TextColor3             = DIST_COLOR
+    distLbl.Font                   = Enum.Font.GothamBold
+    distLbl.TextSize               = 12
+    distLbl.Text                   = ""
+    distLbl.TextStrokeTransparency = 0
+    distLbl.TextStrokeColor3       = Color3.new(0, 0, 0)
+
+    espHeartbeats[key] = RunService.Heartbeat:Connect(function()
+        if not hrp or not hrp.Parent then
+            espHeartbeats[key]:Disconnect()
+            espHeartbeats[key] = nil
+            return
+        end
+        local myChar = LocalPlayer.Character
+        local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+        if myRoot then
+            distLbl.Text = math.floor((myRoot.Position - hrp.Position).Magnitude) .. " studs"
+        end
+    end)
+end
+
+local function removePlayerESP(player)
+    local key = "player__" .. player.Name
+    if espBoxes[key] and espBoxes[key].Parent           then espBoxes[key]:Destroy() end
+    espBoxes[key] = nil
+    if espBillboards[key] and espBillboards[key].Parent then espBillboards[key]:Destroy() end
+    espBillboards[key] = nil
+    if espHeartbeats[key] then espHeartbeats[key]:Disconnect(); espHeartbeats[key] = nil end
+end
+
+local function clearESPByPrefix(prefix)
+    for key, bb in pairs(espBillboards) do
+        if tostring(key):sub(1, #prefix) == prefix then
+            if bb and bb.Parent then bb:Destroy() end
+            espBillboards[key] = nil
+        end
+    end
+    if prefix == "player__" then
+        for key, box in pairs(espBoxes) do
+            if tostring(key):sub(1, 9) == "player__" then
+                if box and box.Parent then box:Destroy() end
+                espBoxes[key] = nil
+            end
+        end
+        for key, conn in pairs(espHeartbeats) do
+            if tostring(key):sub(1, 9) == "player__" then
+                conn:Disconnect(); espHeartbeats[key] = nil
+            end
+        end
+    end
+end
+
+local function refreshPlayerESP()
+    clearESPByPrefix("player__")
+    if not fenv.PlayerESP then return end
+    for _, player in pairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character then
+            createPlayerESP(player)
+        end
+    end
+end
+
+Players.PlayerAdded:Connect(function(player)
+    player.CharacterAdded:Connect(function()
+        task.wait(1)
+        if fenv.PlayerESP then createPlayerESP(player) end
+    end)
+end)
+Players.PlayerRemoving:Connect(function(player) removePlayerESP(player) end)
+
+-- ============================================================
+-- ANTI-LAG
+-- ============================================================
+local antiLagConn = nil
+
+local function applyAntiLagToObj(obj)
+    pcall(function()
+        if obj:IsA("ParticleEmitter") or obj:IsA("Trail") then
+            obj.Enabled = false
+        elseif obj:IsA("Decal") or obj:IsA("Texture") then
+            obj.Transparency = 1
+        elseif obj:IsA("BasePart") or obj:IsA("MeshPart") then
+            obj.Material    = Enum.Material.Plastic
+            obj.Reflectance = 0
+            obj.CastShadow  = false
+        elseif obj:IsA("Smoke") or obj:IsA("Fire") or obj:IsA("Sparkles") then
+            obj.Enabled = false
+        end
+    end)
+end
+
+local function applyLightingAntiLag(ultra)
+    pcall(function()
+        Lighting.GlobalShadows            = false
+        Lighting.FogEnd                   = 9e9
+        Lighting.FogStart                 = 9e9
+        Lighting.Brightness               = ultra and 1 or 2
+        Lighting.EnvironmentDiffuseScale  = 0
+        Lighting.EnvironmentSpecularScale = 0
+        if not ultra then Lighting.ClockTime = 12 end
+        for _, fx in ipairs(Lighting:GetChildren()) do
+            if fx:IsA("PostEffect") or fx:IsA("BloomEffect") or fx:IsA("BlurEffect")
+                or fx:IsA("SunRaysEffect") or fx:IsA("ColorCorrectionEffect") then
+                fx.Enabled = false
+            end
+        end
+    end)
+end
+
+local function enableAntiLag(ultra)
+    applyLightingAntiLag(ultra)
+    for _, obj in ipairs(Workspace:GetDescendants()) do
+        applyAntiLagToObj(obj)
+        if ultra then
+            pcall(function()
+                if obj:IsA("Accessory") or obj:IsA("Clothing")
+                    or obj:IsA("Shirt") or obj:IsA("Pants") then
+                    local char = LocalPlayer.Character
+                    if not (char and obj:IsDescendantOf(char)) then obj:Destroy() end
+                end
+            end)
+        end
+    end
+    if not antiLagConn then
+        antiLagConn = Workspace.DescendantAdded:Connect(applyAntiLagToObj)
+    end
+    print("[IrishCombined]: Anti-Lag " .. (ultra and "ULTRA" or "ON"))
+end
+
+local function disableAntiLag()
+    if antiLagConn then antiLagConn:Disconnect(); antiLagConn = nil end
+end
+
+-- ============================================================
+-- OPTIMIZE
+-- FIX: removed duplicate `local Lighting` declaration
+-- ============================================================
+local optimizeConn = nil
+
+local function enableOptimize()
+    pcall(function()
+        settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+        Lighting.GlobalShadows = false
+        Lighting.Brightness    = 2
+        Lighting.FogEnd        = 9e9
+        Lighting.FogStart      = 9e9
+        for _, fx in ipairs(Lighting:GetChildren()) do
+            if fx:IsA("PostEffect") then fx.Enabled = false end
+        end
+    end)
+    pcall(function()
+        local char = LocalPlayer.Character
+        for _, obj in ipairs(Workspace:GetDescendants()) do
+            pcall(function()
+                if char and obj:IsDescendantOf(char) then return end
+                if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam")
+                    or obj:IsA("Smoke") or obj:IsA("Fire") or obj:IsA("Sparkles") then
+                    obj.Enabled = false; obj:Destroy()
+                elseif obj:IsA("BasePart") then
+                    obj.CastShadow = false
+                    obj.Material   = Enum.Material.Plastic
+                    for _, child in ipairs(obj:GetChildren()) do
+                        if child:IsA("Decal") or child:IsA("Texture") or child:IsA("SurfaceAppearance") then
+                            child:Destroy()
+                        end
+                    end
+                elseif obj:IsA("Sky") then
+                    obj:Destroy()
+                end
+            end)
+        end
+    end)
+    optimizeConn = Workspace.DescendantAdded:Connect(function(obj)
+        pcall(function()
+            local char = LocalPlayer.Character
+            if char and obj:IsDescendantOf(char) then return end
+            if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam")
+                or obj:IsA("Smoke") or obj:IsA("Fire") or obj:IsA("Sparkles") then
+                obj.Enabled = false; obj:Destroy()
+            elseif obj:IsA("BasePart") then
+                obj.CastShadow = false
+                obj.Material   = Enum.Material.Plastic
+            elseif obj:IsA("Sky") then
+                obj:Destroy()
+            end
+        end)
+    end)
+end
+
+local function disableOptimize()
+    if optimizeConn then optimizeConn:Disconnect(); optimizeConn = nil end
+end
+
+-- ============================================================
+-- ROOT ScreenGui
+-- ============================================================
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name              = "IrishNotifierUI"
+screenGui.ResetOnSpawn      = false
+screenGui.ZIndexBehavior    = Enum.ZIndexBehavior.Sibling
+screenGui.IgnoreGuiInset    = true
+screenGui.DisplayOrder      = 10
+screenGui.Parent            = playerGui
+
+-- ============================================================
+-- SETTINGS POPUP
+-- ============================================================
+local function makeSettingToggle(parent, xPos, yPos, width, height, fenvKey, labelText)
+    local btn = Instance.new("TextButton", parent)
+    btn.Size            = UDim2.new(0, width, 0, height)
+    btn.Position        = UDim2.new(0, xPos, 0, yPos)
+    btn.TextColor3      = Color3.new(1, 1, 1)
+    btn.Font            = Enum.Font.GothamBold
+    btn.TextSize        = fontSize
+    btn.BorderSizePixel = 0
+    addCorner(btn, 8)
+    local function refresh()
+        if fenv[fenvKey] then
+            btn.Text             = labelText .. ": ON"
+            btn.BackgroundColor3 = Color3.fromRGB(57, 255, 20)
+            btn.TextColor3       = Color3.fromRGB(0, 0, 0)
+        else
+            btn.Text             = labelText .. ": OFF"
+            btn.BackgroundColor3 = Color3.fromRGB(20, 30, 20)
+            btn.TextColor3       = Color3.fromRGB(57, 255, 20)
+        end
+    end
+    refresh()
+    btn.MouseButton1Click:Connect(function()
+        fenv[fenvKey] = not fenv[fenvKey]
+        refresh()
+        if     fenvKey == "PlayerESP"   then refreshPlayerESP()
+        elseif fenvKey == "BrainrotESP" then
+            if not fenv.BrainrotESP then clearESPByPrefix("brainrot__") end
+        elseif fenvKey == "AntiLag"     then
+            if fenv.AntiLag then enableAntiLag(fenv.UltraMode) else disableAntiLag() end
+        elseif fenvKey == "UltraMode"   then
+            if fenv.UltraMode and fenv.AntiLag then enableAntiLag(true) end
+        elseif fenvKey == "Optimize"    then
+            if fenv.Optimize then enableOptimize() else disableOptimize() end
+        end
+        print("[IrishCombined]: " .. labelText .. " " .. (fenv[fenvKey] and "ON" or "OFF"))
+    end)
+    return btn
+end
+
+local function openSettings()
+    local existing = playerGui:FindFirstChild("AutoJoin_Settings")
+    if existing then existing:Destroy(); return end
+
+    local sectionH = 22
+    local gap      = 8
+    local pad      = 10
+    local popupW   = 250
+    local popupH   = titleBarH + pad + sectionH + gap + 5 * (btnH + gap) + pad
+
+    local sg = Instance.new("ScreenGui")
+    sg.Name           = "AutoJoin_Settings"
+    sg.ResetOnSpawn   = false
+    sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    sg.DisplayOrder   = 20
+    sg.Parent         = playerGui
+
+    local frame = Instance.new("Frame", sg)
+    frame.Size             = UDim2.new(0, popupW, 0, popupH)
+    frame.Position         = UDim2.new(0.5, -popupW/2, 0.5, -popupH/2)
+    frame.BackgroundColor3 = Color3.fromRGB(5, 14, 5)
+    frame.BorderSizePixel  = 0
+    addCorner(frame, 12)
+    addStroke(frame, Color3.fromRGB(57, 255, 20), 2)
+    makeDraggable(frame, frame)
+
+    local popTitleBar = Instance.new("Frame", frame)
+    popTitleBar.Size             = UDim2.new(1, 0, 0, titleBarH)
+    popTitleBar.BackgroundColor3 = Color3.fromRGB(8, 22, 8)
+    popTitleBar.BorderSizePixel  = 0
+    addCorner(popTitleBar, 10)
+
+    local titleLbl = Instance.new("TextLabel", popTitleBar)
+    titleLbl.Size                = UDim2.new(1, -44, 1, 0)
+    titleLbl.Position            = UDim2.new(0, 14, 0, 0)
+    titleLbl.BackgroundTransparency = 1
+    titleLbl.TextColor3          = Color3.fromRGB(57, 255, 20)
+    titleLbl.Font                = Enum.Font.GothamBold
+    titleLbl.TextSize            = titleSize
+    titleLbl.TextXAlignment      = Enum.TextXAlignment.Left
+    titleLbl.Text                = "Settings"
+
+    local closeX = Instance.new("TextButton", popTitleBar)
+    closeX.Size             = UDim2.new(0, 30, 0, 30)
+    closeX.Position         = UDim2.new(1, -36, 0.5, -15)
+    closeX.BackgroundColor3 = Color3.fromRGB(120, 20, 20)
+    closeX.TextColor3       = Color3.new(1, 1, 1)
+    closeX.Font             = Enum.Font.GothamBold
+    closeX.TextSize         = 13
+    closeX.Text             = "X"
+    closeX.BorderSizePixel  = 0
+    addCorner(closeX, 6)
+    closeX.MouseButton1Click:Connect(function() sg:Destroy() end)
+
+    local cursor = titleBarH + pad
+
+    local div = Instance.new("Frame", frame)
+    div.Size                  = UDim2.new(1, -20, 0, 1)
+    div.Position              = UDim2.new(0, 10, 0, cursor - 4)
+    div.BackgroundColor3      = Color3.fromRGB(57, 255, 20)
+    div.BackgroundTransparency = 0.6
+    div.BorderSizePixel       = 0
+
+    local featLbl = Instance.new("TextLabel", frame)
+    featLbl.Size                = UDim2.new(1, -20, 0, sectionH)
+    featLbl.Position            = UDim2.new(0, 10, 0, cursor)
+    featLbl.BackgroundTransparency = 1
+    featLbl.TextColor3          = Color3.fromRGB(57, 255, 20)
+    featLbl.Font                = Enum.Font.GothamBold
+    featLbl.TextSize            = fontSize
+    featLbl.TextXAlignment      = Enum.TextXAlignment.Left
+    featLbl.Text                = "Features"
+    cursor = cursor + sectionH + gap
+
+    for _, def in ipairs({
+        {key = "BrainrotESP", label = "Brainrot ESP"},
+        {key = "PlayerESP",   label = "Player ESP"},
+        {key = "AntiLag",     label = "Anti-Lag"},
+        {key = "UltraMode",   label = "Ultra Mode"},
+        {key = "Optimize",    label = "Optimize"},
+    }) do
+        makeSettingToggle(frame, 10, cursor, popupW - 20, btnH, def.key, def.label)
+        cursor = cursor + btnH + gap
+    end
+end
+
+-- ============================================================
+-- MAIN PANEL
+-- ============================================================
+local notifierFrame = Instance.new("Frame")
+notifierFrame.Name             = "IrishNotifierPanel"
+notifierFrame.Size             = UDim2.new(0, panelW, 0, panelH)
+notifierFrame.Position         = UDim2.new(0, 460, 0.12, 0)
+notifierFrame.BackgroundColor3 = Color3.fromRGB(5, 12, 5)
+notifierFrame.BorderSizePixel  = 0
+notifierFrame.Visible          = true
+notifierFrame.ZIndex           = 3
+notifierFrame.Parent           = screenGui
+addCorner(notifierFrame, 10)
+addStroke(notifierFrame, Color3.fromRGB(57, 255, 20), 2.5)
+
+-- TITLE BAR
+local titleBar = Instance.new("Frame", notifierFrame)
+titleBar.Size             = UDim2.new(1, 0, 0, titleBarH)
+titleBar.BackgroundColor3 = Color3.fromRGB(8, 20, 8)
+titleBar.BorderSizePixel  = 0
+titleBar.ZIndex           = 4
+addCorner(titleBar, 10)
+makeDraggable(notifierFrame, titleBar)
+
+local titleLabel = Instance.new("TextLabel", titleBar)
+titleLabel.Size                = UDim2.new(0, 180, 1, 0)
+titleLabel.Position            = UDim2.new(0, 10, 0, 0)
+titleLabel.BackgroundTransparency = 1
+titleLabel.TextColor3          = Color3.fromRGB(57, 255, 20)
+titleLabel.Font                = Enum.Font.GothamBold
+titleLabel.TextSize            = titleSize
+titleLabel.TextXAlignment      = Enum.TextXAlignment.Left
+titleLabel.Text                = "IRISH COMBINED / PREMIUM"
+
+-- FIX: pre-computed offsets to avoid inline division in UDim2 chains
+local settingsTitleBtn = Instance.new("TextButton", titleBar)
+settingsTitleBtn.Size             = UDim2.new(0, 72, 0, titleBtnH)
+settingsTitleBtn.Position         = UDim2.new(1, -148, 0.5, -titleBtnHalf)
+settingsTitleBtn.BackgroundColor3 = Color3.fromRGB(38, 38, 38)
+settingsTitleBtn.TextColor3       = Color3.new(1, 1, 1)
+settingsTitleBtn.Font             = Enum.Font.GothamBold
+settingsTitleBtn.TextSize         = 12
+settingsTitleBtn.Text             = "Settings"
+settingsTitleBtn.BorderSizePixel  = 0
+addCorner(settingsTitleBtn, 6)
+settingsTitleBtn.MouseButton1Click:Connect(openSettings)
+settingsTitleBtn.MouseEnter:Connect(function() settingsTitleBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 60) end)
+settingsTitleBtn.MouseLeave:Connect(function() settingsTitleBtn.BackgroundColor3 = Color3.fromRGB(38, 38, 38) end)
+
+local credLabel = Instance.new("TextLabel", titleBar)
+credLabel.Size                = UDim2.new(1, -10, 0, 12)
+credLabel.Position            = UDim2.new(0, 10, 1, -13)
+credLabel.BackgroundTransparency = 1
+credLabel.TextColor3          = Color3.fromRGB(100, 200, 100)
+credLabel.Font                = Enum.Font.Gotham
+credLabel.TextSize            = 9
+credLabel.TextXAlignment      = Enum.TextXAlignment.Left
+credLabel.Text                = "Cred to Swix + Skixzs"
+credLabel.ZIndex              = 5
+
+local startBtn = Instance.new("TextButton", titleBar)
+startBtn.Size             = UDim2.new(0, 62, 0, titleBtnH)
+startBtn.Position         = UDim2.new(1, -68, 0.5, -titleBtnHalf)
+startBtn.BackgroundColor3 = Color3.fromRGB(0, 100, 0)
+startBtn.TextColor3       = Color3.new(1, 1, 1)
+startBtn.Font             = Enum.Font.GothamBold
+startBtn.TextSize         = 12
+startBtn.Text             = "Start"
+startBtn.BorderSizePixel  = 0
+addCorner(startBtn, 6)
+startBtn.MouseButton1Click:Connect(function()
+    fenv.AutoJoinEnabled = not fenv.AutoJoinEnabled
+    if fenv.AutoJoinEnabled then
+        startBtn.Text             = "Stop"
+        startBtn.BackgroundColor3 = Color3.fromRGB(160, 0, 0)
+        print("[IrishCombined]: AutoJoin Started | Min: " .. tostring(fenv.MinMoney) .. "M")
+    else
+        startBtn.Text             = "Start"
+        startBtn.BackgroundColor3 = Color3.fromRGB(0, 100, 0)
+        print("[IrishCombined]: AutoJoin Stopped")
+    end
+end)
+startBtn.MouseEnter:Connect(function()
+    if not fenv.AutoJoinEnabled then startBtn.BackgroundColor3 = Color3.fromRGB(0, 140, 0) end
+end)
+startBtn.MouseLeave:Connect(function()
+    if not fenv.AutoJoinEnabled then startBtn.BackgroundColor3 = Color3.fromRGB(0, 100, 0) end
+end)
+
+-- COLUMN HEADERS
+local headerY = titleBarH + 8
+local function makeHeader(text, xOff, width)
+    local lbl = Instance.new("TextLabel", notifierFrame)
+    lbl.Size                = UDim2.new(0, width, 0, 20)
+    lbl.Position            = UDim2.new(0, xOff, 0, headerY)
+    lbl.BackgroundTransparency = 1
+    lbl.TextColor3          = Color3.fromRGB(150, 150, 150)
+    lbl.Font                = Enum.Font.GothamBold
+    lbl.TextSize            = 11
+    lbl.TextXAlignment      = Enum.TextXAlignment.Left
+    lbl.Text                = text
+    lbl.ZIndex              = 4
+end
+makeHeader("Brainrot", 12, 160)
+makeHeader("Money/s",  175, 100)
+
+local headerSep = Instance.new("Frame", notifierFrame)
+headerSep.Size             = UDim2.new(1, -20, 0, 1)
+headerSep.Position         = UDim2.new(0, 10, 0, headerY + 22)
+headerSep.BackgroundColor3 = Color3.fromRGB(57, 255, 20)
+headerSep.BorderSizePixel  = 0
+headerSep.ZIndex           = 4
+
+-- QUICK MONEY FILTER BAR
+local quickMoneyY    = headerY + 26
+local quickBtnW      = 70
+local quickBtnH      = 24
+local quickBtns      = {}
+local quickMoneyOpts = {
+    {label = "10M+",  value = 10},
+    {label = "50M+",  value = 50},
+    {label = "100M+", value = 100},
+    {label = "400M+", value = 400},
+}
+for i, opt in ipairs(quickMoneyOpts) do
+    local xOff = 10 + (i - 1) * (quickBtnW + 4)
+    local qb   = Instance.new("TextButton", notifierFrame)
+    qb.Size             = UDim2.new(0, quickBtnW, 0, quickBtnH)
+    qb.Position         = UDim2.new(0, xOff, 0, quickMoneyY)
+    qb.BackgroundColor3 = (fenv.MinMoney == opt.value) and Color3.fromRGB(57, 255, 20) or Color3.fromRGB(20, 30, 20)
+    qb.TextColor3       = (fenv.MinMoney == opt.value) and Color3.fromRGB(0, 0, 0)     or Color3.fromRGB(57, 255, 20)
+    qb.Font             = Enum.Font.GothamBold
+    qb.TextSize         = 11
+    qb.Text             = opt.label
+    qb.BorderSizePixel  = 0
+    qb.ZIndex           = 5
+    addCorner(qb, 6)
+    addStroke(qb, Color3.fromRGB(57, 255, 20), 1)
+    table.insert(quickBtns, {btn = qb, value = opt.value})
+    qb.MouseButton1Click:Connect(function()
+        fenv.MinMoney = opt.value
+        for _, ref in ipairs(quickBtns) do
+            ref.btn.BackgroundColor3 = (fenv.MinMoney == ref.value) and Color3.fromRGB(57, 255, 20) or Color3.fromRGB(20, 30, 20)
+            ref.btn.TextColor3       = (fenv.MinMoney == ref.value) and Color3.fromRGB(0, 0, 0)     or Color3.fromRGB(57, 255, 20)
+        end
+        print("[IrishCombined]: Min money set to " .. opt.label)
+    end)
+end
+
+local scrollY    = headerY + 26 + 30
+local paidBarH   = 30
+
+local paidBar = Instance.new("Frame", notifierFrame)
+paidBar.Size             = UDim2.new(1, -20, 0, paidBarH)
+paidBar.Position         = UDim2.new(0, 10, 0, scrollY)
+paidBar.BackgroundColor3 = Color3.fromRGB(20, 14, 0)
+paidBar.BorderSizePixel  = 0
+paidBar.ZIndex           = 4
+addCorner(paidBar, 6)
+addStroke(paidBar, Color3.fromRGB(255, 165, 0), 1.5)
+
+local paidLabel = Instance.new("TextLabel", paidBar)
+paidLabel.Size                = UDim2.new(1, -10, 1, 0)
+paidLabel.Position            = UDim2.new(0, 8, 0, 0)
+paidLabel.BackgroundTransparency = 1
+paidLabel.TextColor3          = Color3.fromRGB(255, 180, 0)
+paidLabel.Font                = Enum.Font.GothamBold
+paidLabel.TextSize            = 11
+paidLabel.TextXAlignment      = Enum.TextXAlignment.Left
+paidLabel.Text                = "Paid Joiner: A LOT MORE LOGS - Coming Soon"
+paidLabel.ZIndex              = 5
+
+scrollY = scrollY + paidBarH + 5
+
+-- RESULTS SCROLL
+local resultsScroll = Instance.new("ScrollingFrame", notifierFrame)
+resultsScroll.Size                   = UDim2.new(1, -20, 0, panelH - scrollY - bottomBarH - 8)
+resultsScroll.Position               = UDim2.new(0, 10, 0, scrollY)
+resultsScroll.BackgroundTransparency = 1
+resultsScroll.BorderSizePixel        = 0
+resultsScroll.ScrollBarThickness     = 4
+resultsScroll.ScrollBarImageColor3   = Color3.fromRGB(57, 255, 20)
+resultsScroll.CanvasSize             = UDim2.new(0, 0, 0, 0)
+resultsScroll.AutomaticCanvasSize    = Enum.AutomaticSize.Y
+resultsScroll.ZIndex                 = 4
+
+local listLayout = Instance.new("UIListLayout", resultsScroll)
+listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+listLayout.Padding   = UDim.new(0, 4)
+
+local emptyLabel = Instance.new("TextLabel", resultsScroll)
+emptyLabel.Size                = UDim2.new(1, 0, 0, 50)
+emptyLabel.BackgroundTransparency = 1
+emptyLabel.TextColor3          = Color3.fromRGB(70, 70, 70)
+emptyLabel.Font                = Enum.Font.Gotham
+emptyLabel.TextSize            = fontSize
+emptyLabel.Text                = "Scanning for brainrots..."
+
+-- ============================================================
+-- LOG STORAGE + DEDUP
+-- ============================================================
+local serverLogs    = {}
+local loggedJobIds  = {}
+local LOG_COOLDOWN  = 15
+local lastLogTime   = {}
+local SCAN_INTERVAL = 8
+local lastScanTime  = 0
+
+-- ============================================================
+-- JOIN LOGIC
+-- ============================================================
+local joinCooldown  = false
+local JOIN_COOLDOWN = 5
+
+local function joinServer(placeId, jobId)
+    local opened = false
+    if syn and syn.request then
+        pcall(function()
+            syn.open_url("roblox://experiences/start?placeId=" .. tostring(placeId) .. "&gameInstanceId=" .. tostring(jobId))
+            opened = true
+        end)
+    end
+    if not opened and open_url then
+        pcall(function()
+            open_url("roblox://experiences/start?placeId=" .. tostring(placeId) .. "&gameInstanceId=" .. tostring(jobId))
+            opened = true
+        end)
+    end
+    if not opened then
+        pcall(function() TeleportService:TeleportToPlaceInstance(placeId, jobId, LocalPlayer) end)
+    end
+end
+
+local function tryJoinServer(placeId, jobId, brainrotName)
+    if not placeId or not jobId then
+        warn("[IrishCombined]: Cannot join - missing placeId or jobId for " .. tostring(brainrotName))
+        return
+    end
+    if joinCooldown then
+        warn("[IrishCombined]: Join on cooldown.")
+        return
+    end
+    joinCooldown = true
+    print("[IrishCombined]: Joining " .. tostring(brainrotName)
+        .. " PlaceId=" .. tostring(placeId)
+        .. " JobId="   .. tostring(jobId))
+    joinServer(placeId, jobId)
+    task.delay(JOIN_COOLDOWN, function() joinCooldown = false end)
+end
+
+-- ============================================================
+-- ADD ROW  (bridge: bot hits -> notifier UI)
+-- ============================================================
+local function addRow(brainrotName, subText, moneyPerSec, placeId, jobId)
+    if jobId and loggedJobIds[tostring(jobId)] then return end
+    if jobId then loggedJobIds[tostring(jobId)] = true end
+
+    local now = tick()
+    if lastLogTime[brainrotName] and (now - lastLogTime[brainrotName]) < LOG_COOLDOWN then return end
+    lastLogTime[brainrotName] = now
+
+    if emptyLabel and emptyLabel.Parent then
+        emptyLabel:Destroy()
+        emptyLabel = nil
+    end
+
+    table.insert(serverLogs, {
+        brainrotName = brainrotName,
+        subText      = subText,
+        moneyPerSec  = moneyPerSec,
+        placeId      = placeId,
+        jobId        = jobId,
+        timestamp    = os.time(),
+    })
+
+    local rowH = 44
+    local row  = Instance.new("Frame", resultsScroll)
+    row.Size             = UDim2.new(1, 0, 0, rowH)
+    row.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
+    row.BorderSizePixel  = 0
+    row.ZIndex           = 5
+    addCorner(row, 6)
+
+    local nameL = Instance.new("TextLabel", row)
+    nameL.Size                = UDim2.new(0, 150, 0, rowH/2)
+    nameL.Position            = UDim2.new(0, 8, 0, 3)
+    nameL.BackgroundTransparency = 1
+    nameL.TextColor3          = Color3.new(1, 1, 1)
+    nameL.Font                = Enum.Font.GothamBold
+    nameL.TextSize            = fontSize
+    nameL.TextXAlignment      = Enum.TextXAlignment.Left
+    nameL.TextTruncate        = Enum.TextTruncate.AtEnd
+    nameL.Text                = tostring(brainrotName)
+    nameL.ZIndex              = 6
+
+    local subL = Instance.new("TextLabel", row)
+    subL.Size                = UDim2.new(0, 150, 0, rowH/2 - 4)
+    subL.Position            = UDim2.new(0, 8, 0, rowH/2 + 2)
+    subL.BackgroundTransparency = 1
+    subL.TextColor3          = Color3.fromRGB(110, 110, 110)
+    subL.Font                = Enum.Font.Gotham
+    subL.TextSize            = 11
+    subL.TextXAlignment      = Enum.TextXAlignment.Left
+    subL.Text                = tostring(subText)
+    subL.ZIndex              = 6
+
+    local monL = Instance.new("TextLabel", row)
+    monL.Size                = UDim2.new(0, 100, 1, 0)
+    monL.Position            = UDim2.new(0, 165, 0, 0)
+    monL.BackgroundTransparency = 1
+    monL.TextColor3          = Color3.fromRGB(57, 255, 20)
+    monL.Font                = Enum.Font.GothamBold
+    monL.TextSize            = fontSize
+    monL.TextXAlignment      = Enum.TextXAlignment.Left
+    monL.Text                = tostring(moneyPerSec) .. "M/s"
+    monL.ZIndex              = 6
+
+    -- FIX: pre-compute join button vertical offset
+    local joinBtnH    = 26
+    local joinBtnHalf = joinBtnH / 2
+    local joinBtn = Instance.new("TextButton", row)
+    joinBtn.Size            = UDim2.new(0, 50, 0, joinBtnH)
+    joinBtn.Position        = UDim2.new(1, -58, 0.5, -joinBtnHalf)
+    joinBtn.BorderSizePixel = 0
+    joinBtn.Font            = Enum.Font.GothamBold
+    joinBtn.TextSize        = fontSize
+    joinBtn.TextColor3      = Color3.new(1, 1, 1)
+    joinBtn.ZIndex          = 6
+    addCorner(joinBtn, 6)
+
+    if placeId and jobId then
+        joinBtn.Text             = "Join"
+        joinBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+        joinBtn.MouseEnter:Connect(function() joinBtn.BackgroundColor3 = Color3.fromRGB(0, 120, 0) end)
+        joinBtn.MouseLeave:Connect(function() joinBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 30) end)
+        joinBtn.MouseButton1Click:Connect(function()
+            joinBtn.Text             = "..."
+            joinBtn.BackgroundColor3 = Color3.fromRGB(0, 80, 0)
+            tryJoinServer(placeId, jobId, brainrotName)
+            task.wait(3)
+            if joinBtn and joinBtn.Parent then
+                joinBtn.Text             = "Join"
+                joinBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+            end
+        end)
+        if fenv.AutoJoinEnabled then
+            local money = tonumber(moneyPerSec) or 0
+            if money >= fenv.MinMoney then
+                task.delay(0.5, function() tryJoinServer(placeId, jobId, brainrotName) end)
+            end
+        end
+    else
+        joinBtn.Text             = "Log"
+        joinBtn.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+        joinBtn.TextColor3       = Color3.fromRGB(100, 100, 100)
+        joinBtn.Active           = false
+    end
+
+    if fenv.BrainrotESP and (tonumber(moneyPerSec) or 0) >= fenv.MinMoney then
+        local model = Workspace:FindFirstChild(tostring(brainrotName), true)
+        if model then
+            local root = model:IsA("BasePart") and model
+                or model:FindFirstChildWhichIsA("BasePart")
+            if root then
+                local key = "brainrot__" .. tostring(brainrotName)
+                if espBillboards[key] and espBillboards[key].Parent then espBillboards[key]:Destroy() end
+                espBillboards[key] = createBrainrotBillboard(root, tostring(brainrotName), tostring(moneyPerSec))
+            end
+        end
+    end
+
+    print("[IrishCombined]: LOG | " .. tostring(brainrotName)
+        .. " | " .. tostring(moneyPerSec) .. "M/s"
+        .. " | PlaceId=" .. tostring(placeId)
+        .. " JobId=" .. tostring(jobId))
+end
+
+-- ============================================================
+-- WORKSPACE BRAINROT SCANNER
+-- ============================================================
+local brainrotSet = {}
+for _, name in ipairs(allBrainrots) do brainrotSet[name] = true end
+
+local function scanWorkspaceForBrainrots()
+    local now = tick()
+    if now - lastScanTime < SCAN_INTERVAL then return end
+    lastScanTime = now
+    for _, obj in ipairs(Workspace:GetChildren()) do
+        if brainrotSet[obj.Name] then
+            local moneyVal = 0
+            local mv = obj:FindFirstChild("MoneyPerSec")
+                    or obj:FindFirstChild("Money")
+                    or obj:FindFirstChild("MPS")
+                    or obj:FindFirstChild("Income")
+            if mv and (mv:IsA("NumberValue") or mv:IsA("IntValue")) then
+                moneyVal = mv.Value
+            end
+            local jobId   = obj:GetAttribute("JobId")
+                         or (obj:FindFirstChild("JobId") and obj:FindFirstChild("JobId").Value) or nil
+            local placeId = obj:GetAttribute("PlaceId")
+                         or (obj:FindFirstChild("PlaceId") and obj:FindFirstChild("PlaceId").Value) or nil
+            local money   = tonumber(moneyVal) or 0
+            if money >= fenv.MinMoney or not fenv.AutoJoinEnabled then
+                addRow(obj.Name, "Found in Workspace", money, placeId, jobId)
+            end
+        end
+    end
+end
+
+Workspace.ChildAdded:Connect(function(obj)
+    task.wait(0.5)
+    if brainrotSet[obj.Name] then
+        local moneyVal = 0
+        local mv = obj:FindFirstChild("MoneyPerSec")
+                or obj:FindFirstChild("Money")
+                or obj:FindFirstChild("MPS")
+                or obj:FindFirstChild("Income")
+        if mv and (mv:IsA("NumberValue") or mv:IsA("IntValue")) then
+            moneyVal = mv.Value
+        end
+        local jobId   = obj:GetAttribute("JobId")
+                     or (obj:FindFirstChild("JobId") and obj:FindFirstChild("JobId").Value) or nil
+        local placeId = obj:GetAttribute("PlaceId")
+                     or (obj:FindFirstChild("PlaceId") and obj:FindFirstChild("PlaceId").Value) or nil
+        local money   = tonumber(moneyVal) or 0
+        if money >= fenv.MinMoney or not fenv.AutoJoinEnabled then
+            addRow(obj.Name, "Appeared in Workspace", money, placeId, jobId)
+        end
+    end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(SCAN_INTERVAL)
+        scanWorkspaceForBrainrots()
+    end
+end)
+
+-- ============================================================
+-- BOTTOM BAR
+-- ============================================================
+local bottomBar = Instance.new("Frame", notifierFrame)
+bottomBar.Size             = UDim2.new(1, 0, 0, bottomBarH)
+bottomBar.Position         = UDim2.new(0, 0, 1, -bottomBarH)
+bottomBar.BackgroundColor3 = Color3.fromRGB(5, 14, 5)
+bottomBar.BorderSizePixel  = 0
+bottomBar.ZIndex           = 4
+addCorner(bottomBar, 10)
+
+-- FIX: pre-computed bottomBtnH and bottomBtnHalf avoid inline division parse error
+local autoJoinBtn = Instance.new("TextButton", bottomBar)
+autoJoinBtn.Size             = UDim2.new(0.5, -8, 0, bottomBtnH)
+autoJoinBtn.Position         = UDim2.new(0, 6, 0.5, -bottomBtnHalf)
+autoJoinBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+autoJoinBtn.TextColor3       = Color3.new(1, 1, 1)
+autoJoinBtn.Font             = Enum.Font.GothamBold
+autoJoinBtn.TextSize         = fontSize
+autoJoinBtn.Text             = "Auto Join: OFF"
+autoJoinBtn.BorderSizePixel  = 0
+autoJoinBtn.ZIndex           = 5
+addCorner(autoJoinBtn, 6)
+
+autoJoinBtn.MouseButton1Click:Connect(function()
+    fenv.AutoJoinEnabled = not fenv.AutoJoinEnabled
+    if fenv.AutoJoinEnabled then
+        autoJoinBtn.Text             = "Auto Join: ON"
+        autoJoinBtn.BackgroundColor3 = Color3.fromRGB(0, 140, 0)
+        startBtn.Text                = "Stop"
+        startBtn.BackgroundColor3    = Color3.fromRGB(160, 0, 0)
+    else
+        autoJoinBtn.Text             = "Auto Join: OFF"
+        autoJoinBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+        startBtn.Text                = "Start"
+        startBtn.BackgroundColor3    = Color3.fromRGB(0, 100, 0)
+    end
+end)
+
+local filterToggleBtn = Instance.new("TextButton", bottomBar)
+filterToggleBtn.Size             = UDim2.new(0.5, -8, 0, bottomBtnH)
+filterToggleBtn.Position         = UDim2.new(0.5, 2, 0.5, -bottomBtnHalf)
+filterToggleBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+filterToggleBtn.TextColor3       = Color3.new(1, 1, 1)
+filterToggleBtn.Font             = Enum.Font.GothamBold
+filterToggleBtn.TextSize         = fontSize
+filterToggleBtn.Text             = "Filters"
+filterToggleBtn.BorderSizePixel  = 0
+filterToggleBtn.ZIndex           = 5
+addCorner(filterToggleBtn, 6)
+filterToggleBtn.MouseEnter:Connect(function() filterToggleBtn.BackgroundColor3 = Color3.fromRGB(0, 100, 0) end)
+filterToggleBtn.MouseLeave:Connect(function() filterToggleBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 30) end)
+
+-- ============================================================
+-- FILTERS PANEL
+-- ============================================================
+local filtersFrame = Instance.new("Frame")
+filtersFrame.Name             = "FiltersPanel"
+filtersFrame.Size             = UDim2.new(0, filterW, 0, filterH)
+filtersFrame.Position         = UDim2.new(0, 70, 0.12, 0)
+filtersFrame.BackgroundColor3 = Color3.fromRGB(5, 14, 5)
+filtersFrame.BorderSizePixel  = 0
+filtersFrame.Visible          = false
+filtersFrame.ZIndex           = 10
+filtersFrame.Parent           = screenGui
+addCorner(filtersFrame, 10)
+addStroke(filtersFrame, Color3.fromRGB(57, 255, 20), 1)
+
+local fTitleBar = Instance.new("Frame", filtersFrame)
+fTitleBar.Size             = UDim2.new(1, 0, 0, titleBarH)
+fTitleBar.BackgroundColor3 = Color3.fromRGB(8, 20, 8)
+fTitleBar.BorderSizePixel  = 0
+fTitleBar.ZIndex           = 11
+addCorner(fTitleBar, 10)
+makeDraggable(filtersFrame, fTitleBar)
+
+local fTitleLbl = Instance.new("TextLabel", fTitleBar)
+fTitleLbl.Size                = UDim2.new(1, -50, 1, 0)
+fTitleLbl.Position            = UDim2.new(0, 14, 0, 0)
+fTitleLbl.BackgroundTransparency = 1
+fTitleLbl.TextColor3          = Color3.fromRGB(57, 255, 20)
+fTitleLbl.Font                = Enum.Font.GothamBold
+fTitleLbl.TextSize            = titleSize
+fTitleLbl.TextXAlignment      = Enum.TextXAlignment.Left
+fTitleLbl.Text                = "Filters"
+fTitleLbl.ZIndex              = 12
+
+local fCloseBtn = Instance.new("TextButton", fTitleBar)
+fCloseBtn.Size             = UDim2.new(0, 30, 0, 30)
+fCloseBtn.Position         = UDim2.new(1, -36, 0.5, -15)
+fCloseBtn.BackgroundColor3 = Color3.fromRGB(100, 20, 20)
+fCloseBtn.TextColor3       = Color3.new(1, 1, 1)
+fCloseBtn.Font             = Enum.Font.GothamBold
+fCloseBtn.TextSize         = 13
+fCloseBtn.Text             = "X"
+fCloseBtn.BorderSizePixel  = 0
+fCloseBtn.ZIndex           = 12
+addCorner(fCloseBtn, 6)
+fCloseBtn.MouseButton1Click:Connect(function() filtersFrame.Visible = false end)
+
+local hideY     = titleBarH + 8
+
+local hideLabel = Instance.new("TextLabel", filtersFrame)
+hideLabel.Size                = UDim2.new(1, -20, 0, 20)
+hideLabel.Position            = UDim2.new(0, 10, 0, hideY)
+hideLabel.BackgroundTransparency = 1
+hideLabel.TextColor3          = Color3.new(1, 1, 1)
+hideLabel.Font                = Enum.Font.GothamBold
+hideLabel.TextSize            = fontSize
+hideLabel.TextXAlignment      = Enum.TextXAlignment.Left
+hideLabel.Text                = "Hide Brainrots"
+hideLabel.ZIndex              = 11
+
+local searchBox = Instance.new("TextBox", filtersFrame)
+searchBox.Size               = UDim2.new(1, -20, 0, btnH + 2)
+searchBox.Position           = UDim2.new(0, 10, 0, hideY + 22)
+searchBox.BackgroundColor3   = Color3.fromRGB(22, 22, 22)
+searchBox.TextColor3         = Color3.fromRGB(200, 200, 200)
+searchBox.Font               = Enum.Font.Gotham
+searchBox.TextSize           = fontSize
+searchBox.PlaceholderText    = "Search brainrot..."
+searchBox.PlaceholderColor3  = Color3.fromRGB(80, 80, 80)
+searchBox.Text               = ""
+searchBox.ClearTextOnFocus   = false
+searchBox.BorderSizePixel    = 0
+searchBox.ZIndex             = 11
+addCorner(searchBox, 8)
+addStroke(searchBox, Color3.fromRGB(55, 55, 55), 1)
+
+local btnRowY = hideY + 22 + btnH + 8
+
+local selectAllBtn = Instance.new("TextButton", filtersFrame)
+selectAllBtn.Size             = UDim2.new(0.5, -8, 0, btnH)
+selectAllBtn.Position         = UDim2.new(0, 10, 0, btnRowY)
+selectAllBtn.BackgroundColor3 = Color3.fromRGB(38, 38, 38)
+selectAllBtn.TextColor3       = Color3.new(1, 1, 1)
+selectAllBtn.Font             = Enum.Font.Gotham
+selectAllBtn.TextSize         = fontSize
+selectAllBtn.Text             = "Select All"
+selectAllBtn.BorderSizePixel  = 0
+selectAllBtn.ZIndex           = 11
+addCorner(selectAllBtn, 6)
+
+local clearAllBtn = Instance.new("TextButton", filtersFrame)
+clearAllBtn.Size             = UDim2.new(0.5, -8, 0, btnH)
+clearAllBtn.Position         = UDim2.new(0.5, 2, 0, btnRowY)
+clearAllBtn.BackgroundColor3 = Color3.fromRGB(38, 38, 38)
+clearAllBtn.TextColor3       = Color3.new(1, 1, 1)
+clearAllBtn.Font             = Enum.Font.Gotham
+clearAllBtn.TextSize         = fontSize
+clearAllBtn.Text             = "Clear All"
+clearAllBtn.BorderSizePixel  = 0
+clearAllBtn.ZIndex           = 11
+addCorner(clearAllBtn, 6)
+
+local gridY = btnRowY + btnH + 8
+local gridH = filterH - gridY - 10
+
+local scrollFrame = Instance.new("ScrollingFrame", filtersFrame)
+scrollFrame.Size                   = UDim2.new(1, -20, 0, gridH)
+scrollFrame.Position               = UDim2.new(0, 10, 0, gridY)
+scrollFrame.BackgroundTransparency = 1
+scrollFrame.BorderSizePixel        = 0
+scrollFrame.ScrollBarThickness     = 4
+scrollFrame.ScrollBarImageColor3   = Color3.fromRGB(57, 255, 20)
+scrollFrame.CanvasSize             = UDim2.new(0, 0, 0, 0)
+scrollFrame.AutomaticCanvasSize    = Enum.AutomaticSize.Y
+scrollFrame.ZIndex                 = 11
+
+local gridLayout = Instance.new("UIGridLayout", scrollFrame)
+gridLayout.CellSize    = UDim2.new(0.5, -5, 0, 36)
+gridLayout.CellPadding = UDim2.new(0, 6, 0, 6)
+gridLayout.SortOrder   = Enum.SortOrder.LayoutOrder
+
+local selectedBrainrots  = {}
+local brainrotButtonRefs = {}
+
+for _, name in ipairs(allBrainrots) do
+    local btn = Instance.new("TextButton", scrollFrame)
+    btn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    btn.TextColor3       = Color3.new(1, 1, 1)
+    btn.Font             = Enum.Font.Gotham
+    btn.TextSize         = 11
+    btn.Text             = name
+    btn.TextWrapped      = true
+    btn.BorderSizePixel  = 0
+    btn.ZIndex           = 12
+    addCorner(btn, 6)
+    brainrotButtonRefs[name] = btn
+    btn.MouseButton1Click:Connect(function()
+        selectedBrainrots[name]  = not selectedBrainrots[name]
+        btn.BackgroundColor3 = selectedBrainrots[name]
+            and Color3.fromRGB(0, 110, 0) or Color3.fromRGB(30, 30, 30)
+    end)
+end
+
+searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+    local query = searchBox.Text:lower()
+    for name, btn in pairs(brainrotButtonRefs) do
+        btn.Visible = query == "" or name:lower():find(query, 1, true) ~= nil
+    end
+end)
+
+selectAllBtn.MouseButton1Click:Connect(function()
+    for _, name in ipairs(allBrainrots) do
+        if brainrotButtonRefs[name] and brainrotButtonRefs[name].Visible then
+            selectedBrainrots[name]                  = true
+            brainrotButtonRefs[name].BackgroundColor3 = Color3.fromRGB(0, 110, 0)
+        end
+    end
+end)
+
+clearAllBtn.MouseButton1Click:Connect(function()
+    for _, name in ipairs(allBrainrots) do
+        selectedBrainrots[name] = false
+        if brainrotButtonRefs[name] then
+            brainrotButtonRefs[name].BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+        end
+    end
+end)
+
+filterToggleBtn.MouseButton1Click:Connect(function()
+    filtersFrame.Visible = not filtersFrame.Visible
+end)
+
+-- ============================================================
+-- INITIAL SCAN
+-- ============================================================
+task.delay(2, scanWorkspaceForBrainrots)
+
+-- ============================================================
+-- PUBLIC API
+-- ============================================================
+genv.IrishNotifier_AddRow    = addRow
+genv.IrishNotifier_ESPPlayer = refreshPlayerESP
+genv.IrishNotifier_TryJoin   = tryJoinServer
+
+print("IRISH COMBINED: Loaded! Worker = " .. USERNAME)
